@@ -17,6 +17,13 @@ loomx.loom_version = "1.17-SNAPSHOT"
 publish.modrinth = "hbSfT032"
 publish.curseforge = "1740837"
 
+["1.8.9"]
+mod.mc_compat = "1.8.9"
+mod.mc_releases = ["1.8.9"]
+deps.oneconfig = "1.5.0"
+deps.fabric_language_kotlin = "1.14.1+kotlin.2.4.20"
+deps.feather_build = "2"
+
 ["1.21.1"]
 mod.mc_compat = "1.21.1"
 mod.mc_releases = ["1.21.1"]

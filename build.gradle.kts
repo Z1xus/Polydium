@@ -5,6 +5,7 @@ import dev.kikugie.loomx.LoomCompatProjectExtension
 import dev.kikugie.stonecutter.build.StonecutterBuildExtension
 import net.fabricmc.loom.api.LoomGradleExtensionAPI
 import net.fabricmc.loom.task.prod.ClientProductionRunTask
+import net.ornithemc.ploceus.api.PloceusGradleExtensionApi
 import org.gradle.api.tasks.testing.logging.TestExceptionFormat
 import org.jetbrains.kotlin.gradle.dsl.KotlinJvmExtension
 
@@ -12,12 +13,21 @@ plugins {
     java
     kotlin("jvm")
     id("dev.kikugie.loom-back-compat")
+    id("net.fabricmc.fabric-loom-remap") version "1.17-SNAPSHOT" apply false
+    id("ploceus") version "1.17.4" apply false
     id("me.modmuss50.mod-publish-plugin") version "2.2.0"
     `maven-publish`
 }
 
 val stonecutter = extensions.getByName("stonecutter") as StonecutterBuildExtension
 val mcVersion = stonecutter.current.version
+val isOrnithe = mcVersion == "1.8.9"
+val ploceus = if (isOrnithe) {
+    pluginManager.apply("net.fabricmc.fabric-loom-remap")
+    pluginManager.apply("ploceus")
+    configurations.configureEach { exclude(group = "org.lwjgl.lwjgl") }
+    extensions.getByType<PloceusGradleExtensionApi>().apply { setIntermediaryGeneration(2) }
+} else null
 
 run {
     val (version, loader) = stonecutter.current.project.split("-", limit = 2)
@@ -57,6 +67,9 @@ repositories {
     maven("https://jitpack.io") {
         content { includeGroupAndSubgroups("com.github") }
     }
+    maven("https://maven.ornithemc.net/releases") {
+        content { includeGroupAndSubgroups("net.ornithemc") }
+    }
     maven("https://maven.fabricmc.net/") {
         content { includeGroupAndSubgroups("net.fabricmc") }
     }
@@ -66,6 +79,7 @@ repositories {
     strictMaven("https://maven.terraformersmc.com/releases/", "TerraformersMC", "com.terraformersmc")
     strictMaven("https://api.modrinth.com/maven", "Modrinth", "maven.modrinth")
     strictMaven("https://maven.bawnorton.com/releases", "Bawnorton", "com.github.bawnorton.mixinsquared")
+    strictMaven("https://maven.cloverclient.com/releases", "CloverClient", "pl.tomgirl")
 }
 
 configurations.all {
@@ -76,7 +90,15 @@ configurations.all {
     }
 }
 
-val javaVersion = if (stonecutter.current.parsed >= "26.1") 25 else 21
+val javaVersion = if (isOrnithe || stonecutter.current.parsed >= "26.1") 25 else 21
+
+if (isOrnithe) {
+    val ornitheMixins = setOf("MixinPlainTranslation.java", "MixinSoundListenerThrottle.java")
+    sourceSets.main {
+        java.exclude { "/perf/" in it.path && it.name !in ornitheMixins }
+        kotlin.exclude { "/perf/" in it.path && it.name !in ornitheMixins }
+    }
+}
 
 configure<KotlinJvmExtension> {
     jvmToolchain(javaVersion)
@@ -93,7 +115,9 @@ java {
     }
 }
 
-if (stonecutter.current.parsed < "26.3") {
+if (isOrnithe) {
+    sourceSets.test { java.exclude("**"); kotlin.exclude("**") }
+} else if (stonecutter.current.parsed < "26.3") {
     sourceSets.test { kotlin.exclude("**/TxTextFastPathTest.kt") }
 }
 
@@ -101,7 +125,17 @@ val loomExt = extensions.getByName<LoomGradleExtensionAPI>("loom")
 
 dependencies {
     minecraft("com.mojang:minecraft:$mcVersion")
-    dependencies.extensions.getByType<LoomCompatDependencyExtension>().applyMojangMappings()
+    if (isOrnithe) {
+        mappings(ploceus!!.layeredMappings {
+            mappings("net.ornithemc:feather-gen2:$mcVersion+build.${property("deps.feather_build")}:v2") {
+                containsUnpick()
+            }
+        })
+    } else {
+        dependencies.extensions.getByType<LoomCompatDependencyExtension>().applyMojangMappings()
+        modLocalRuntime("me.djtheredstoner:DevAuth-fabric:${property("deps.devauth")}")
+        modImplementation("net.fabricmc.fabric-api:fabric-api:${property("deps.fabric_api")}")
+    }
 
     implementation("org.jetbrains.kotlin:kotlin-stdlib:${property("deps.kotlin")}")
     annotationProcessor("io.github.llamalad7:mixinextras-common:${property("deps.mixin_extras")}")
@@ -110,13 +144,13 @@ dependencies {
         implementation(include(it)!!)
     }
 
-    modLocalRuntime("me.djtheredstoner:DevAuth-fabric:${property("deps.devauth")}")
-    modImplementation("net.fabricmc.fabric-api:fabric-api:${property("deps.fabric_api")}")
     modImplementation("net.fabricmc:fabric-loader:$fabricLoaderVersion")
     runtimeOnly("net.fabricmc:fabric-language-kotlin:$fabricLanguageKotlinVersion")
 
     val oneconfigVersion = property("deps.oneconfig") as String
-    modImplementation("org.polyfrost.oneconfig:$mcVersion-fabric:$oneconfigVersion")
+    modImplementation("org.polyfrost.oneconfig:$mcVersion-${if (isOrnithe) "ornithe" else "fabric"}:$oneconfigVersion") {
+        exclude(group = "net.fabricmc", module = "fabric-language-kotlin")
+    }
     for (module in arrayOf("commands", "config", "config-impl", "events", "internal", "notifications", "ui", "utils", "hud")) {
         implementation("org.polyfrost.oneconfig:$module:$oneconfigVersion")
     }
@@ -149,7 +183,7 @@ val modOutputGroup = sourceSets.main.get().output
 
 loomExt.runs.configureEach {
     ideConfigGenerated(true)
-    runDir("../../run")
+    runDir(if (isOrnithe) "../../run/ornithe" else "../../run")
     vmArg("-Dfabric.classPathGroups=$modOutputGroup")
 }
 
@@ -171,6 +205,9 @@ tasks.withType<ProcessResources>().configureEach {
     inputs.property("minorMcVersion", minecraftPredicate)
     inputs.property("oneconfigVersion", oneconfigVersion)
     filesMatching("fabric.mod.json") {
+        if (isOrnithe) filter { line ->
+            line.takeUnless { "\"fabric-api\": \"*\"" in it }?.replace("\"java\": \">=21\"", "\"java\": \">=25\"")
+        }
         expand(
             mapOf(
                 "mod_id" to modId,
@@ -187,7 +224,7 @@ tasks.withType<ProcessResources>().configureEach {
     }
 }
 
-tasks.register<ClientProductionRunTask>("prodClient") {
+if (!isOrnithe) tasks.register<ClientProductionRunTask>("prodClient") {
     optionalProperty("polydium.gameDir")?.let { runDir.set(file(it)) }
 }
 
@@ -232,7 +269,7 @@ publishMods {
     changelog = changelogs
     type = STABLE
 
-    modLoaders.add("fabric")
+    modLoaders.add(if (isOrnithe) "ornithe" else "fabric")
 
     dryRun = (modrinthId == null || modrinthToken == null) && (curseforgeId == null || curseforgeToken == null)
 
@@ -246,7 +283,7 @@ publishMods {
             environment = CLIENT_ONLY
 
             requires("oneconfig")
-            requires("fabric-api")
+            if (!isOrnithe) requires("fabric-api")
             requires("fabric-language-kotlin")
         }
     }
@@ -262,7 +299,7 @@ publishMods {
             server = false
 
             requires("oneconfig")
-            requires("fabric-api")
+            if (!isOrnithe) requires("fabric-api")
             requires("fabric-language-kotlin")
         }
     }
